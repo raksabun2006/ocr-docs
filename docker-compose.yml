@@ -1,0 +1,62 @@
+services:
+  # ----------------------------------------------------------------------------
+  # PostgreSQL 16 Database
+  # ----------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: khmer_gov_docs_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_secure_password
+      POSTGRES_DB: khmer_gov_docs
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d khmer_gov_docs"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # FastAPI OCR & Document Intelligence API
+  # ----------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: khmer_gov_docs_api
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=Khmer Government Document Intelligence System
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres_secure_password@db:5432/khmer_gov_docs
+      - DB_FALLBACK_SQLITE=false
+      - TESSERACT_CMD=/usr/bin/tesseract
+      - TESSDATA_DIR=/usr/share/tesseract-ocr/5/tessdata
+      - OCR_DEFAULT_LANGUAGES=khm+eng
+      - MAX_UPLOAD_SIZE_MB=15
+      - UPLOAD_DIR=uploads/documents
+      - MASK_SENSITIVE_LOGS=true
+    volumes:
+      # Live-mount application code so frontend and backend update instantly
+      - ./app:/app/app
+      # Persistent storage for uploaded citizen documents
+      - document_storage:/app/uploads/documents
+      # Optional: Mount your Windows traineddata directory into container
+      # - C:/Users/TUF/tesseract-data:/tesseract-custom-data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    name: khmer_gov_docs_postgres_data
+  document_storage:
+    name: khmer_gov_docs_document_storage

@@ -1,0 +1,26 @@
+# Git & Environment
+.git
+.gitignore
+.env
+*.env.example
+
+# Python cache & virtual environment
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases & uploads
+*.db
+*.sqlite3
+uploads/documents/*
+!uploads/documents/.gitkeep
+
+# IDE files
+.vscode/
+.idea/
