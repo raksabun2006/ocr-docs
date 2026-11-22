@@ -27,6 +27,8 @@ from app.routers.classification_router import router as classification_router
 from app.routers.search_router import router as search_router
 from app.routers.audit_router import router as audit_router
 from app.routers.receipt_router import router as receipt_router
+from app.routers.auth_router import router as auth_router
+from app.routers.admin_router import router as admin_router
 
 # Configure Logging
 logging.basicConfig(
@@ -137,6 +139,8 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 # Register API v1 Routers
 api_prefix = settings.API_V1_STR
+app.include_router(auth_router, prefix=api_prefix)
+app.include_router(admin_router, prefix=api_prefix)
 app.include_router(document_router, prefix=api_prefix)
 app.include_router(verification_router, prefix=api_prefix)
 app.include_router(classification_router, prefix=api_prefix)

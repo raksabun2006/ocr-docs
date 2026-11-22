@@ -91,25 +91,59 @@ class OCRService:
         if not os.path.exists(self.tesseract_cmd):
             return False
         try:
-            _ = pytesseract.get_tesseract_version()
-            return True
+            import subprocess
+            proc = subprocess.run(
+                [self.tesseract_cmd, "--version"],
+                capture_output=True,
+                timeout=2,
+                check=False
+            )
+            return proc.returncode == 0
         except Exception:
             return False
 
     def get_available_languages(self) -> List[str]:
         """Lists all trained data language models available to Tesseract."""
-        try:
-            config_arg = self.get_tessdata_config_arg()
-            langs = pytesseract.get_languages(config=config_arg)
-            return langs
-        except Exception as exc:
-            logger.warning(f"Could not retrieve available languages from Tesseract: {exc}")
-            found = []
-            if self.tessdata_dir and os.path.isdir(self.tessdata_dir):
+        found = set()
+        # 1. Check directory directly first (instant, 0 subprocess overhead)
+        if self.tessdata_dir and os.path.isdir(self.tessdata_dir):
+            try:
                 for fname in os.listdir(self.tessdata_dir):
                     if fname.endswith(".traineddata"):
-                        found.append(fname.replace(".traineddata", ""))
-            return found
+                        found.add(fname.replace(".traineddata", ""))
+            except Exception:
+                pass
+
+        # 2. Check default Tesseract tessdata folder if different
+        parent_tessdata = os.path.join(os.path.dirname(self.tesseract_cmd), "tessdata")
+        if os.path.isdir(parent_tessdata):
+            try:
+                for fname in os.listdir(parent_tessdata):
+                    if fname.endswith(".traineddata"):
+                        found.add(fname.replace(".traineddata", ""))
+            except Exception:
+                pass
+
+        if found:
+            return sorted(list(found))
+
+        # 3. Fallback to CLI with safe 2-second timeout
+        try:
+            import subprocess
+            proc = subprocess.run(
+                [self.tesseract_cmd, "--list-langs"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False
+            )
+            if proc.returncode == 0:
+                lines = [line.strip() for line in proc.stdout.splitlines() if line.strip() and not line.startswith("List of")]
+                return sorted(lines)
+        except Exception as exc:
+            logger.warning(f"Could not retrieve available languages from Tesseract: {exc}")
+
+        return []
 
     def verify_environment(self, force_refresh: bool = False) -> Dict[str, Any]:
         """Verifies Tesseract installation and presence of required English and Khmer models."""
