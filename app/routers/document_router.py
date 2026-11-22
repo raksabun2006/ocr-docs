@@ -25,6 +25,7 @@ from app.services.file_validator import (
 from app.services.image_service import (
     preprocess_for_ocr,
     convert_pdf_to_images,
+    generate_multi_representation_variants,
     ImageProcessingError
 )
 from app.services.ocr_service import ocr_service, OCRError
@@ -87,18 +88,20 @@ async def upload_and_process_document(
         if mime_type == "application/pdf":
             # Convert first page of PDF for OCR
             pdf_pages = convert_pdf_to_images(file_bytes, max_pages=1)
-            # Encode back to PNG buffer for preprocessing pipeline
             import cv2
             success, enc = cv2.imencode(".png", pdf_pages[0])
             if not success:
                 raise ImageProcessingError("Failed to encode PDF raster.")
-            preprocessed_img = preprocess_for_ocr(enc.tobytes())
+            img_input_bytes = enc.tobytes()
         else:
-            preprocessed_img = preprocess_for_ocr(file_bytes)
+            img_input_bytes = file_bytes
 
-        # Run Tesseract OCR in Khmer + English
-        raw_text = ocr_service.extract_text(preprocessed_img, languages=settings.OCR_DEFAULT_LANGUAGES)
-        structured_ocr_data = ocr_service.extract_structured_ocr_data(preprocessed_img, languages=settings.OCR_DEFAULT_LANGUAGES)
+        # Adaptive multi-representation preprocessing and multi-PSM OCR
+        variants = generate_multi_representation_variants(img_input_bytes)
+        raw_text, structured_ocr_data = ocr_service.process_document_adaptive(
+            variants,
+            languages=settings.OCR_DEFAULT_LANGUAGES
+        )
         avg_confidence = structured_ocr_data.get("average_confidence", 0.0)
     except (ImageProcessingError, OCRError) as err:
         # Gracefully preserve document record even if scan is blank/corrupt

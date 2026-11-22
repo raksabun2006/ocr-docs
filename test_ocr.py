@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.config import settings
 from app.services.ocr_service import ocr_service
-from app.services.image_service import preprocess_for_ocr
+from app.services.image_service import generate_multi_representation_variants
 
 
 def generate_sample_khmer_document(output_path: str = "sample_test_doc.png") -> str:
@@ -93,17 +93,16 @@ def run_checks(image_path: str = None) -> bool:
         image_path = generate_sample_khmer_document("test_verify_khmer_doc.png")
         temp_generated = True
 
-    print(f"\n[4] Running OpenCV Preprocessing & Multi-Language OCR on: {image_path}")
+    print(f"\n[4] Running Advanced Adaptive Preprocessing & Multi-Language OCR on: {image_path}")
     try:
         with open(image_path, "rb") as f:
             raw_bytes = f.read()
 
-        preprocessed = preprocess_for_ocr(raw_bytes)
-        print("    ✓ OpenCV Preprocessing completed (Deskew, CLAHE, Bilateral Filter, Otsu).")
+        variants = generate_multi_representation_variants(raw_bytes)
+        print("    ✓ OpenCV Preprocessing completed (Illumination Compensation, Line Suppression, CLAHE, Scale Norm).")
 
-        # Run OCR
-        extracted_text = ocr_service.extract_text(preprocessed, languages="khm+eng")
-        structured_data = ocr_service.extract_structured_ocr_data(preprocessed, languages="khm+eng")
+        # Run Adaptive Multi-Pass OCR
+        extracted_text, structured_data = ocr_service.process_document_adaptive(variants, languages="khm+eng")
 
         print("\n" + "-" * 70)
         print("EXTRACTED TEXT:")

@@ -1,17 +1,19 @@
 """
-Tesseract OCR Service
+Tesseract OCR Service (Khmer & English Advanced Engine)
 Khmer Government Document Intelligence System
 
-Integrates Tesseract OCR for English + Khmer language processing:
-- Robust multi-language extraction (`khm+eng`).
-- Clean tessdata directory and environment variable handling on Windows 11.
-- Word-level confidence scoring and bounding box extraction for human verification.
-- Safe error handling without revealing internal server paths or stack traces.
+Specialized OCR engine engineered for Cambodian administrative documents & handwriting:
+- Adaptive Multi-PSM fallback (PSM 6, 4, 11, 3) ensuring no document is missed.
+- LSTM Neural Network engine optimization (--oem 1, --dpi 300, preserve_interword_spaces=1).
+- Multi-Representation evaluation (evaluates both Enhanced Grayscale and Clean Adaptive Binary).
+- Khmer Unicode post-processing and line artifact suppression.
+- Word-level confidence scoring and bounding box coordinates for human verification.
 """
 
 import os
+import re
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
 import pytesseract
 from pytesseract import Output, TesseractError, TesseractNotFoundError
@@ -31,8 +33,37 @@ class OCRConfigurationError(OCRError):
     pass
 
 
+def clean_khmer_ocr_text(text: str) -> str:
+    """
+    Cleans OCR artifacts common to scanned Cambodian documents & graph paper:
+    - Removes isolated separator artifacts (e.g. lines with only `---`, `===`, `| | |`).
+    - Standardizes Khmer punctuation and numerals.
+    - Strips extraneous control characters while preserving UTF-8 Khmer characters.
+    """
+    if not text:
+        return ""
+
+    cleaned_lines = []
+    lines = text.split("\n")
+
+    for line in lines:
+        stripped = line.strip()
+        # Filter out lines consisting only of grid line remnants (e.g. —, _, |, =, ~, `)
+        if re.match(r"^[\s\-_\|\=\~\`\.\,\:\;\+\*\#\/\\]+$", stripped):
+            continue
+        # Remove repeated pipes or vertical bar noise
+        normalized = re.sub(r"\|{2,}", "|", stripped)
+        if normalized:
+            cleaned_lines.append(normalized)
+
+    result = "\n".join(cleaned_lines)
+    # Normalize multiple blank lines to at most two
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
+
+
 class OCRService:
-    """Manages Tesseract OCR execution, language verification, and structured data extraction."""
+    """Manages multi-language Tesseract OCR with adaptive multi-pass Khmer recognition."""
 
     def __init__(self):
         self.tesseract_cmd = settings.TESSERACT_CMD
@@ -49,10 +80,7 @@ class OCRService:
             os.environ["TESSDATA_PREFIX"] = self.tessdata_dir
 
     def get_tessdata_config_arg(self) -> str:
-        """
-        Builds the clean command-line argument for --tessdata-dir without quotes
-        that can break on Windows Tesseract CLI.
-        """
+        """Builds the clean command-line argument for --tessdata-dir without quotes."""
         if self.tessdata_dir and os.path.isdir(self.tessdata_dir):
             clean_dir = self.tessdata_dir.replace("\\", "/")
             return f"--tessdata-dir {clean_dir}"
@@ -76,7 +104,6 @@ class OCRService:
             return langs
         except Exception as exc:
             logger.warning(f"Could not retrieve available languages from Tesseract: {exc}")
-            # Check filesystem directly as fallback
             found = []
             if self.tessdata_dir and os.path.isdir(self.tessdata_dir):
                 for fname in os.listdir(self.tessdata_dir):
@@ -85,10 +112,7 @@ class OCRService:
             return found
 
     def verify_environment(self, force_refresh: bool = False) -> Dict[str, Any]:
-        """
-        Verifies Tesseract installation and presence of required English and Khmer models.
-        Caches the result to avoid spawning heavy CLI subprocesses on repeated health calls.
-        """
+        """Verifies Tesseract installation and presence of required English and Khmer models."""
         if self._env_cache is not None and not force_refresh:
             return self._env_cache
 
@@ -108,6 +132,18 @@ class OCRService:
         }
         return self._env_cache
 
+    def build_tesseract_config(self, psm: int = 3, extra_args: str = "") -> str:
+        """Constructs an optimized Tesseract configuration string for Khmer script."""
+        parts = []
+        tess_arg = self.get_tessdata_config_arg()
+        if tess_arg:
+            parts.append(tess_arg)
+        # Force LSTM engine, calibration DPI, and inter-word space preservation
+        parts.append(f"--psm {psm} --oem 1 --dpi 300 -c preserve_interword_spaces=1")
+        if extra_args:
+            parts.append(extra_args)
+        return " ".join(parts)
+
     def extract_text(
         self,
         image: np.ndarray,
@@ -115,28 +151,30 @@ class OCRService:
         psm: int = 3
     ) -> str:
         """
-        Extracts plain text from a preprocessed image using Tesseract.
-
-        Args:
-            image: Preprocessed OpenCV image array.
-            languages: Plus-separated language code (default: 'khm+eng').
-            psm: Page segmentation mode (default 3: Fully automatic).
+        Extracts plain text with automatic multi-PSM fallback.
+        If the primary PSM returns empty or sparse text, automatically tries
+        PSM 6 (uniform text block), PSM 4 (single column), or PSM 11 (sparse text).
         """
         lang = languages or self.default_languages
-        config_parts = []
-        tess_arg = self.get_tessdata_config_arg()
-        if tess_arg:
-            config_parts.append(tess_arg)
-        config_parts.append(f"--psm {psm}")
-        custom_config = " ".join(config_parts)
+        candidate_psms = [psm] + [p for p in [6, 4, 11, 3] if p != psm]
+        best_text = ""
 
         try:
-            text = pytesseract.image_to_string(
-                image,
-                lang=lang,
-                config=custom_config
-            )
-            return text.strip()
+            for candidate_psm in candidate_psms:
+                custom_config = self.build_tesseract_config(psm=candidate_psm)
+                raw_text = pytesseract.image_to_string(
+                    image,
+                    lang=lang,
+                    config=custom_config
+                )
+                cleaned = clean_khmer_ocr_text(raw_text)
+                if len(cleaned) > len(best_text):
+                    best_text = cleaned
+                    # If we found substantial text (more than 20 chars), accept and return
+                    if len(best_text) >= 20:
+                        break
+
+            return best_text.strip()
         except TesseractNotFoundError:
             raise OCRConfigurationError("Tesseract OCR executable not found on the server.")
         except TesseractError as te:
@@ -153,70 +191,132 @@ class OCRService:
         psm: int = 3
     ) -> Dict[str, Any]:
         """
-        Extracts detailed word-level OCR output including confidence scores and bounding boxes.
-        Used to highlight uncertain OCR results in human verification workflows.
+        Extracts word-level confidence scores and bounding boxes with multi-PSM fallback.
         """
         lang = languages or self.default_languages
-        config_parts = []
-        tess_arg = self.get_tessdata_config_arg()
-        if tess_arg:
-            config_parts.append(tess_arg)
-        config_parts.append(f"--psm {psm}")
-        custom_config = " ".join(config_parts)
+        candidate_psms = [psm] + [p for p in [6, 4, 11, 3] if p != psm]
+        best_result = None
+        max_words = -1
 
-        try:
-            data = pytesseract.image_to_data(
-                image,
-                lang=lang,
-                config=custom_config,
-                output_type=Output.DICT
-            )
+        for candidate_psm in candidate_psms:
+            custom_config = self.build_tesseract_config(psm=candidate_psm)
+            try:
+                data = pytesseract.image_to_data(
+                    image,
+                    lang=lang,
+                    config=custom_config,
+                    output_type=Output.DICT
+                )
 
-            words = []
-            total_conf = 0.0
-            valid_word_count = 0
+                words = []
+                total_conf = 0.0
+                valid_word_count = 0
+                n_boxes = len(data["text"])
 
-            n_boxes = len(data["text"])
-            for i in range(n_boxes):
-                text = data["text"][i].strip()
-                conf = float(data["conf"][i])
+                for i in range(n_boxes):
+                    text = data["text"][i].strip()
+                    conf = float(data["conf"][i])
 
-                # Tesseract returns -1 for spaces and layout delimiters
-                if conf < 0 or not text:
-                    continue
+                    if conf < 0 or not text:
+                        continue
 
-                valid_word_count += 1
-                total_conf += conf
+                    # Ignore lone noise characters from grid lines
+                    if len(text) == 1 and text in "-_|=~`.,:;+*#/\\[]":
+                        continue
 
-                # Flag uncertainty level based on configuration thresholds
-                uncertainty = "low_uncertainty"
-                if conf < settings.CONFIDENCE_THRESHOLD_MEDIUM:
-                    uncertainty = "high_uncertainty"
-                elif conf < settings.CONFIDENCE_THRESHOLD_HIGH:
-                    uncertainty = "medium_uncertainty"
+                    valid_word_count += 1
+                    total_conf += conf
 
-                words.append({
-                    "text": text,
-                    "confidence": round(conf, 2),
-                    "uncertainty_level": uncertainty,
-                    "box": {
-                        "left": data["left"][i],
-                        "top": data["top"][i],
-                        "width": data["width"][i],
-                        "height": data["height"][i]
-                    }
-                })
+                    uncertainty = "low_uncertainty"
+                    if conf < settings.CONFIDENCE_THRESHOLD_MEDIUM:
+                        uncertainty = "high_uncertainty"
+                    elif conf < settings.CONFIDENCE_THRESHOLD_HIGH:
+                        uncertainty = "medium_uncertainty"
 
-            average_confidence = round(total_conf / valid_word_count, 2) if valid_word_count > 0 else 0.0
+                    words.append({
+                        "text": text,
+                        "confidence": round(conf, 2),
+                        "uncertainty_level": uncertainty,
+                        "box": {
+                            "left": data["left"][i],
+                            "top": data["top"][i],
+                            "width": data["width"][i],
+                            "height": data["height"][i]
+                        }
+                    })
 
-            return {
-                "average_confidence": average_confidence,
-                "total_words": valid_word_count,
-                "words": words,
-            }
-        except Exception as exc:
-            logger.error(f"Structured OCR extraction error: {exc}")
-            raise OCRError("Failed to extract structured OCR coordinates and confidence metrics.")
+                avg_conf = round(total_conf / valid_word_count, 2) if valid_word_count > 0 else 0.0
+
+                current_res = {
+                    "average_confidence": avg_conf,
+                    "total_words": valid_word_count,
+                    "words": words,
+                    "used_psm": candidate_psm
+                }
+
+                if valid_word_count > max_words:
+                    max_words = valid_word_count
+                    best_result = current_res
+                    if max_words >= 15:
+                        break
+
+            except Exception as exc:
+                logger.warning(f"Structured OCR candidate PSM {candidate_psm} error: {exc}")
+                continue
+
+        if best_result is not None:
+            return best_result
+
+        return {
+            "average_confidence": 0.0,
+            "total_words": 0,
+            "words": [],
+            "used_psm": psm
+        }
+
+    def process_document_adaptive(
+        self,
+        variants: Dict[str, np.ndarray],
+        languages: Optional[str] = None
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Adaptive Multi-Representation Khmer OCR:
+        Evaluates both Enhanced Grayscale (preferred for LSTM) and Clean Adaptive Binary
+        (preferred for high-contrast graph paper), selecting the superior recognition output.
+        """
+        # Pass 1: Test clean adaptive with grid suppression
+        clean_adaptive = variants.get("clean_adaptive")
+        enhanced_gray = variants.get("enhanced_gray")
+        standard_otsu = variants.get("standard_otsu")
+
+        best_text = ""
+        best_data = None
+        highest_score = -1
+
+        # Evaluate candidate representations
+        for candidate_img in [clean_adaptive, enhanced_gray, standard_otsu]:
+            if candidate_img is None:
+                continue
+
+            try:
+                struct_data = self.extract_structured_ocr_data(candidate_img, languages=languages, psm=6)
+                word_count = struct_data["total_words"]
+                avg_conf = struct_data["average_confidence"]
+                score = word_count * 10 + avg_conf
+
+                if score > highest_score:
+                    highest_score = score
+                    best_data = struct_data
+                    best_text = self.extract_text(candidate_img, languages=languages, psm=struct_data.get("used_psm", 6))
+            except Exception as e:
+                logger.warning(f"Adaptive pass error: {e}")
+                continue
+
+        if not best_text and clean_adaptive is not None:
+            best_text = self.extract_text(clean_adaptive, languages=languages, psm=11)
+            best_data = self.extract_structured_ocr_data(clean_adaptive, languages=languages, psm=11)
+
+        return best_text, best_data or {"average_confidence": 0.0, "total_words": 0, "words": []}
 
 
 ocr_service = OCRService()

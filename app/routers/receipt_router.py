@@ -12,7 +12,7 @@ from typing import List
 
 from app.config import settings
 from app.services.file_validator import validate_document_content, FileValidationError, FileTooLargeError
-from app.services.image_service import preprocess_for_ocr, ImageProcessingError
+from app.services.image_service import generate_multi_representation_variants, ImageProcessingError
 from app.services.ocr_service import ocr_service, OCRError
 
 router = APIRouter(prefix="/receipts", tags=["Receipts Compatibility"])
@@ -54,10 +54,13 @@ async def scan_receipt(
     except FileValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    # 2. Preprocess & OCR
+    # 2. Adaptive Preprocess & OCR
     try:
-        preprocessed = preprocess_for_ocr(file_bytes)
-        text = ocr_service.extract_text(preprocessed, languages=settings.OCR_DEFAULT_LANGUAGES)
+        variants = generate_multi_representation_variants(file_bytes)
+        text, _ = ocr_service.process_document_adaptive(
+            variants,
+            languages=settings.OCR_DEFAULT_LANGUAGES
+        )
     except (ImageProcessingError, OCRError) as err:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="OCR processing error.")
 
