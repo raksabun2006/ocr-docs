@@ -5,7 +5,8 @@ Khmer Government Document Intelligence System
 
 import os
 import hashlib
-from typing import Optional
+from pathlib import Path
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from app.database import get_db
 from app.models import Document, ExtractedField
 from app.schemas.document import DocumentUploadResponse, DocumentMetadataResponse
 from app.schemas.classification import DOCUMENT_TYPE_LABELS, DocumentTypeEnum
+from app.schemas.layout import DocumentLayoutResponse, DocumentContentUpdateRequest, DocxExportResponse, LayoutElement
 from app.services.file_validator import (
     validate_document_content,
     generate_secure_storage_path,
@@ -31,6 +33,9 @@ from app.services.image_service import (
 from app.services.ocr_service import ocr_service, OCRError
 from app.services.classifier_service import classifier_service
 from app.services.extraction_service import birth_certificate_extractor
+from app.services.admin_extraction_service import admin_extractor
+from app.services.layout_service import layout_analyzer
+from app.services.docx_generator_service import docx_generator
 from app.services.audit_service import audit_service
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
@@ -112,10 +117,15 @@ async def upload_and_process_document(
     classification = classifier_service.classify_text(raw_text)
     detected_type = classification.document_type.value
 
-    # 6. Structured Information Extraction (e.g. Birth Certificate)
+    # 6. Structured Information & Layout Extraction
     bc_data = None
     if detected_type == DocumentTypeEnum.BIRTH_CERTIFICATE.value:
         bc_data = birth_certificate_extractor.extract(raw_text, structured_ocr_data)
+
+    gov_entities = admin_extractor.extract(raw_text, structured_ocr_data)
+    layout_elements = layout_analyzer.analyze(raw_text, structured_ocr_data)
+    layout_json = [e.model_dump() for e in layout_elements]
+    gov_entities_json = gov_entities.model_dump()
 
     # 7. Persist to Database
     safe_orig_filename = sanitize_filename(file.filename)
@@ -128,15 +138,18 @@ async def upload_and_process_document(
         sha256_hash=sha256_hash,
         document_type=detected_type,
         is_classified_by_user=False,
-        status="PROCESSED" if raw_text else "PENDING",
+        status="PROCESSED" if raw_text and not raw_text.startswith("[OCR Warning]") else "PENDING",
         raw_text=raw_text,
+        original_ocr_output=raw_text,
+        layout_data=layout_json,
+        structured_entities=gov_entities_json,
         average_confidence=avg_confidence,
         uploaded_by=officer_name
     )
     db.add(new_doc)
     db.flush()
 
-    # Save extracted fields to database
+    # Save extracted birth certificate fields to database if applicable
     if bc_data:
         fields_map = {
             "full_name_khmer": bc_data.full_name_khmer,
@@ -192,8 +205,11 @@ async def upload_and_process_document(
         type_khmer_label=khmer_label,
         status=new_doc.status,
         extracted_text=new_doc.raw_text,
+        edited_text=new_doc.edited_text,
         average_confidence=new_doc.average_confidence,
         birth_certificate_data=bc_data,
+        government_entities=gov_entities_json,
+        layout_detected=len(layout_elements) > 0,
         created_at=new_doc.created_at
     )
 
@@ -205,6 +221,7 @@ def get_document_details(document_id: str, db: Session = Depends(get_db)):
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
+    has_docx = bool(doc.docx_path and os.path.exists(doc.docx_path))
     return DocumentMetadataResponse(
         document_id=doc.id,
         original_filename=doc.original_filename,
@@ -214,9 +231,222 @@ def get_document_details(document_id: str, db: Session = Depends(get_db)):
         document_type=doc.document_type,
         status=doc.status,
         average_confidence=doc.average_confidence,
+        has_edited_text=bool(doc.edited_text),
+        has_docx=has_docx,
         created_at=doc.created_at,
         updated_at=doc.updated_at
     )
+
+
+@router.get("/{document_id}/layout", response_model=DocumentLayoutResponse)
+def get_document_layout(document_id: str, db: Session = Depends(get_db)):
+    """
+    Retrieves structured layout analysis representation:
+    Element types, text blocks, page numbers, alignments, font weights, and tables.
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    elements: List[LayoutElement] = []
+    if doc.layout_data and isinstance(doc.layout_data, list):
+        try:
+            elements = [LayoutElement(**item) for item in doc.layout_data]
+        except Exception:
+            pass
+
+    # If layout was not pre-calculated, analyze on demand from extracted or edited text
+    if not elements and (doc.edited_text or doc.raw_text):
+        active_text = doc.edited_text or doc.raw_text
+        elements = layout_analyzer.analyze(active_text)
+        doc.layout_data = [e.model_dump() for e in elements]
+        db.commit()
+
+    return DocumentLayoutResponse(
+        document_id=doc.id,
+        total_pages=1,
+        elements=elements,
+        raw_text=doc.raw_text or "",
+        edited_text=doc.edited_text,
+        confidence=doc.average_confidence or 0.0
+    )
+
+
+@router.put("/{document_id}/content")
+def update_document_content(
+    document_id: str,
+    update_req: DocumentContentUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Allows human reviewer or operator to correct extracted text and layout elements.
+    Ensures user corrections are preserved and reflected in future Word DOCX exports.
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    if update_req.edited_text is not None:
+        doc.edited_text = update_req.edited_text
+        # If no explicit element structure is passed, re-analyze layout from edited text
+        if not update_req.elements:
+            re_elements = layout_analyzer.analyze(update_req.edited_text)
+            doc.layout_data = [e.model_dump() for e in re_elements]
+
+    if update_req.elements is not None:
+        doc.layout_data = [e.model_dump() for e in update_req.elements]
+
+    # Invalidate existing cached DOCX file so subsequent export reflects new corrections
+    if doc.docx_path and os.path.exists(doc.docx_path):
+        try:
+            os.remove(doc.docx_path)
+        except OSError:
+            pass
+        doc.docx_path = None
+
+    db.commit()
+
+    audit_service.log_action(
+        db=db,
+        user_id="officer",
+        action="UPDATE_CONTENT",
+        resource_type="DOCUMENT",
+        resource_id=document_id,
+        details={"has_edited_text": bool(doc.edited_text), "notes": update_req.notes}
+    )
+
+    return {
+        "success": True,
+        "message": "Document content successfully updated and preserved.",
+        "document_id": document_id
+    }
+
+
+@router.post("/{document_id}/export/docx", response_model=DocxExportResponse)
+def export_document_to_docx(document_id: str, db: Session = Depends(get_db)):
+    """
+    Compiles document layout, extracted text, and human corrections into a real,
+    fully editable Microsoft Word (.docx) document formatted with standard A4 geometry,
+    Cambodian margins, and Khmer Unicode fonts (Khmer OS Muol Light & Khmer OS Siemreap).
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    # 1. Parse layout elements from database or compute from text
+    elements: List[LayoutElement] = []
+    if doc.layout_data and isinstance(doc.layout_data, list):
+        try:
+            elements = [LayoutElement(**item) for item in doc.layout_data]
+        except Exception:
+            pass
+
+    if not elements:
+        active_text = doc.edited_text or doc.raw_text or ""
+        elements = layout_analyzer.analyze(active_text)
+
+    # 2. Generate DOCX file
+    orig_base = Path(doc.original_filename).stem if doc.original_filename else "document"
+    docx_file_path = docx_generator.generate_docx(
+        document_id=doc.id,
+        filename_prefix=orig_base,
+        elements=elements,
+        corrected_text=doc.edited_text
+    )
+
+    # 3. Cache DOCX path on document record
+    doc.docx_path = str(docx_file_path)
+    db.commit()
+
+    file_size = docx_file_path.stat().st_size
+    download_url = f"{settings.API_V1_STR}/documents/{doc.id}/download/docx"
+
+    audit_service.log_action(
+        db=db,
+        user_id="officer",
+        action="GENERATE_DOCX",
+        resource_type="DOCUMENT",
+        resource_id=document_id,
+        details={"file_size": file_size, "filename": docx_file_path.name}
+    )
+
+    from datetime import datetime, timezone
+    return DocxExportResponse(
+        success=True,
+        document_id=doc.id,
+        filename=docx_file_path.name,
+        download_url=download_url,
+        file_size_bytes=file_size,
+        page_count=1,
+        created_at=datetime.now(timezone.utc)
+    )
+
+
+@router.get("/{document_id}/download/docx")
+def download_document_docx(document_id: str, db: Session = Depends(get_db)):
+    """
+    Downloads the editable Microsoft Word document (.docx).
+    Auto-generates the file if not already compiled.
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    # Generate if not exists
+    if not doc.docx_path or not os.path.exists(doc.docx_path):
+        elements: List[LayoutElement] = []
+        if doc.layout_data and isinstance(doc.layout_data, list):
+            try:
+                elements = [LayoutElement(**item) for item in doc.layout_data]
+            except Exception:
+                pass
+        if not elements:
+            active_text = doc.edited_text or doc.raw_text or ""
+            elements = layout_analyzer.analyze(active_text)
+
+        orig_base = Path(doc.original_filename).stem if doc.original_filename else "document"
+        docx_file_path = docx_generator.generate_docx(
+            document_id=doc.id,
+            filename_prefix=orig_base,
+            elements=elements,
+            corrected_text=doc.edited_text
+        )
+        doc.docx_path = str(docx_file_path)
+        db.commit()
+
+    audit_service.log_action(
+        db=db,
+        user_id="officer",
+        action="DOWNLOAD_DOCX",
+        resource_type="DOCUMENT",
+        resource_id=document_id
+    )
+
+    clean_filename = f"{Path(doc.original_filename).stem}_editable.docx"
+    return FileResponse(
+        path=doc.docx_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=clean_filename
+    )
+
+
+@router.get("/{document_id}/status")
+def get_document_processing_status(document_id: str, db: Session = Depends(get_db)):
+    """Returns processing status, OCR confidence, and whether layout/docx are ready."""
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    return {
+        "document_id": doc.id,
+        "status": doc.status,
+        "ocr_completed": bool(doc.raw_text and not doc.raw_text.startswith("[OCR Warning]")),
+        "layout_ready": bool(doc.layout_data),
+        "has_edited_text": bool(doc.edited_text),
+        "docx_ready": bool(doc.docx_path and os.path.exists(doc.docx_path)),
+        "average_confidence": doc.average_confidence,
+        "document_type": doc.document_type
+    }
 
 
 @router.get("/{document_id}/file")

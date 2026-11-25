@@ -20,8 +20,11 @@ class DocumentUploadResponse(BaseModel):
     type_khmer_label: str
     status: str
     extracted_text: Optional[str]
+    edited_text: Optional[str] = None
     average_confidence: Optional[float]
     birth_certificate_data: Optional[BirthCertificateData] = None
+    government_entities: Optional[Dict[str, Any]] = None
+    layout_detected: bool = False
     created_at: datetime
 
 
@@ -34,6 +37,8 @@ class DocumentMetadataResponse(BaseModel):
     document_type: str
     status: str
     average_confidence: Optional[float]
+    has_edited_text: bool = False
+    has_docx: bool = False
     created_at: datetime
     updated_at: datetime
 

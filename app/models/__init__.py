@@ -128,9 +128,13 @@ class Document(Base):
     # Workflow Status: UPLOADED, PROCESSING, PROCESSED, PENDING_REVIEW, VERIFIED, REJECTED, FAILED
     status = Column(String(32), default="PENDING", index=True)
 
-    # OCR Extracted Content
+    # OCR Extracted Content & Editable Layout Structure
     raw_text = Column(Text, nullable=True)
     original_ocr_output = Column(Text, nullable=True)                   # Immutable original OCR text
+    edited_text = Column(Text, nullable=True)                           # User-corrected text
+    layout_data = Column(JSON, nullable=True)                           # Detected layout blocks, tables, alignment
+    structured_entities = Column(JSON, nullable=True)                   # Administrative entities (Ministry, date, etc.)
+    docx_path = Column(String(512), nullable=True)                      # Path to generated editable Word document
     average_confidence = Column(Float, nullable=True)
     uploaded_by = Column(String(100), default="officer")
     user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)

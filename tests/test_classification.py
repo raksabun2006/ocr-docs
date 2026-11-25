@@ -36,9 +36,51 @@ def test_classify_administrative_letter():
 
 
 def test_classify_application_form():
-    text = "ព្រះរាជាណាចក្រកម្ពុជា ពាក្យស្នើសុំ សូមគោរពជូន អាស្រ័យហេតុនេះ ទម្រង់បែបបទ"
+    text = "ព្រះរាជាណាចក្រកម្ពុជា ពាក្យសុំចូលបម្រើការងារ សូមគោរពជូន អាស្រ័យហេតុនេះ ទម្រង់បែបបទ application form"
     result = classifier_service.classify_text(text)
     assert result.document_type == DocumentTypeEnum.APPLICATION_FORM
+
+
+def test_classify_decision():
+    text = "ព្រះរាជាណាចក្រកម្ពុជា ជាតិ សាសនា ព្រះមហាក្សត្រ សេចក្តីសម្រេច សម្រេច ប្រការ ១ ប្រការ ២"
+    result = classifier_service.classify_text(text)
+    assert result.document_type == DocumentTypeEnum.DECISION
+    assert result.confidence > 50.0
+
+
+def test_classify_announcement_notice():
+    text = "ព្រះរាជាណាចក្រកម្ពុជា ក្រសួងព័ត៌មាន សេចក្តីជូនដំណឹង សូមជម្រាបជូនដល់សាធារណជន"
+    result = classifier_service.classify_text(text)
+    assert result.document_type == DocumentTypeEnum.ANNOUNCEMENT_NOTICE
+    assert result.confidence > 50.0
+
+
+def test_classify_invitation_letter():
+    text = "ព្រះរាជាណាចក្រកម្ពុជា លិខិតអញ្ជើញ មានកិត្តិយសសូមអញ្ជើញ ឯកឧត្តម ដើម្បីចូលរួមប្រជុំ"
+    result = classifier_service.classify_text(text)
+    assert result.document_type == DocumentTypeEnum.INVITATION_LETTER
+    assert result.confidence > 50.0
+
+
+def test_classify_request_letter():
+    text = "ព្រះរាជាណាចក្រកម្ពុជា លិខិតស្នើសុំ សូមគោរពស្នើសុំ ការអនុញ្ញាត និងគោលការណ៍"
+    result = classifier_service.classify_text(text)
+    assert result.document_type == DocumentTypeEnum.REQUEST_LETTER
+    assert result.confidence > 50.0
+
+
+def test_classify_report():
+    text = "ព្រះរាជាណាចក្រកម្ពុជា របាយការណ៍ស្តីពី លទ្ធផលការងារប្រចាំត្រីមាស និងទិសដៅការងារបន្ត"
+    result = classifier_service.classify_text(text)
+    assert result.document_type == DocumentTypeEnum.REPORT
+    assert result.confidence > 50.0
+
+
+def test_classify_attestation():
+    text = "ព្រះរាជាណាចក្រកម្ពុជា លិខិតបញ្ជាក់ សូមបញ្ជាក់ថា លោក... ពិតជាបម្រើការងារ ជាការពិតប្រាកដមែន"
+    result = classifier_service.classify_text(text)
+    assert result.document_type == DocumentTypeEnum.ATTESTATION_LETTER
+    assert result.confidence > 50.0
 
 
 def test_classify_unknown_or_blank():
